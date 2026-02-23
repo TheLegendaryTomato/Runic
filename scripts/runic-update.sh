@@ -13,8 +13,8 @@ if [ -z "$CURL" ]; then
 fi
 
 # Download runic.lua
-sudo $CURL --output $SCRIPT_PATH/runic.lua https://raw.githubusercontent.com/Aethari/Runic/refs/heads/latest/runic.lua
+sudo $CURL --output $SCRIPT_PATH/runic.lua https://raw.githubusercontent.com/TheLegendaryTomato/Runic/refs/heads/latest/runic.lua
 
 # Download runic binary
-sudo $CURL --output $SCRIPT_PATH/runic https://raw.githubusercontent.com/Aethari/Runic/refs/heads/latest/scripts/runic.sh
+sudo $CURL --output $SCRIPT_PATH/runic https://raw.githubusercontent.com/TheLegendaryTomato/Runic/refs/heads/latest/scripts/runic.sh
 sudo chmod +x $SCRIPT_PATH/runic

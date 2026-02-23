@@ -9,16 +9,21 @@
 -- will probably need maintanenced at some point).
 
 -- Current objective / fix / feature:
+--	implement the file finder mode
 
 -- TODO: implement horizontal scrolling or line wrapping for long lines
 -- TODO: find a way to listen for the escape key (fixes below bug)
 -- TODO: highlighting / selection (and fix any copying / pasting that comes with it)
 -- TODO: clean up unneccesary NOTE comments
+-- TODO: make the file finder sort files alphabetically?
 
 -- BUG: pressing the escape key from any mode crashes the editor
 -- BUG: the UI and a line of the buffer draw on the command line if the terminal is sized down vertically
 -- BUG: ruler line numbers above 999 take up one extra column of the buffer
 -- BUG: the delete key is still not working? (needs tested)
+-- BUG: when the cursor moves down into scroll range when NOT usingcore.buff_cursor_down() (i.e. enter key) the editor does not scroll
+-- BUG: trying to paste when nothing has been copied crashes the editor (try opening it and immediately pressing ctrl+v)
+-- BUG: sometimes, depending on the character before the cursor, pressing b or e jumps too far
 
 -- == Tables ===================================================
 local log = {}
@@ -27,6 +32,7 @@ local term = {}
 local file = {}
 local buff = {}
 local cmd = {}
+local finder = {}
 local draw = {}
 
 -- kept core global as it is intended to be a "pseudo-api". this way, things like extentions can be created
@@ -128,14 +134,20 @@ end
 
 -- == File management ==========================================
 function file.exists(path)
-	local f = io.open(path, "r")
+	local ok, err = os.rename(path, path)
 
-	if f ~= nil then
-		f:close()
-		return true
-	else
-		return false
+	if not ok then
+		if code == 13 then
+			-- permission denied, but still exists
+			return true
+		end
 	end
+
+	return ok, err
+end
+
+function file.is_dir(path)
+	return file.exists(path.."/")
 end
 
 function file.read(path)
@@ -168,8 +180,49 @@ function file.write(path, str)
 	f:close()
 end
 
+-- gets a list of text files contained in every directory and subdirectory starting from the working directory
+function file.list(path)
+	path = path or ""
+
+	local out = {}
+
+	local objs = {}
+
+	local ls = io.popen("ls "..path, "r")
+	local dir = ""
+	while dir ~= nil do
+		dir = ls:read()
+
+		if dir ~= nil then
+			table.insert(objs, dir)
+		end
+	end
+	ls:close()
+
+	for _,v in pairs(objs) do
+		local obj
+
+		if path == "" then
+			obj = v
+		else
+			obj = path.."/"..v
+		end
+
+		if file.is_dir(obj) then
+			local cat = file.list(path..obj)
+
+			for _,v2 in pairs(cat) do
+				table.insert(out, v2)
+			end
+		elseif file.exists(obj) then
+			table.insert(out, obj)
+		end
+	end
+
+	return out
+end
+
 -- == Mode management ==========================================
--- TODO: implement file finder (using mode 4)
 -- 1 = edit
 -- 2 = nav
 -- 3 = command line
@@ -239,7 +292,12 @@ function buff.draw()
 	end
 
 	-- add values to offset the various lines used by the UI
-	ansi.write(tostring(buff.y - buff.offset + 1)..";"..tostring(buff.x+4+(tab_count*3)).."H")
+	if buff.y < 1000 then
+		ansi.write(tostring(buff.y - buff.offset + 1)..";"..tostring(buff.x+4+(tab_count*3)).."H")
+	else
+		-- FIXME: this works for a temporary solution, but it would be better to just make all offsets +1 when there is 1k or more lines
+		ansi.write(tostring(buff.y - buff.offset + 1)..";"..tostring(buff.x+5+(tab_count*3)).."H")
+	end
 end
 
 -- copies the contents of buff.str to out
@@ -351,17 +409,28 @@ function draw.ui()
 	elseif mode == 3 then
 		draw.str(5, 0, "CMD")
 	elseif mode == 4 then
-		draw.str(5, 0, "BROWSER")
+		draw.str(5, 0, "FILE")
 	end
 
-	draw.str((size.w/2) - (#buff.filename/2), 1, buff.filename)
-	if not buff.saved then draw.str((size.w/2) - (#buff.filename/2) + #buff.filename, 1, "*") end
+	if mode ~= 4 then
+		draw.str((size.w/2) - (#buff.filename/2), 1, buff.filename)
+		if not buff.saved then draw.str((size.w/2) - (#buff.filename/2) + #buff.filename, 1, "*") end
 
-	local pos = "("..buff.x..":"..buff.y..")"
-	draw.str(size.w - #pos - 1, 1, pos)
+		local pos = "("..buff.x..":"..buff.y..")"
+		draw.str(size.w - #pos - 1, 1, pos)
 
-	-- bottom line
-	draw.str(size.w - 71, size.h, "ctrl+r for command line | ctrl+o to open file | ctrl+p for file browser")
+		-- bottom line
+		local bottomstr = "ctrl+r for command line | ctrl+o to open file | ctrl+p for file browser"
+		draw.str(size.w - #bottomstr, size.h, bottomstr)
+	else
+		local title = "File browser"
+		draw.str((size.w/2) - (#title/2), 1, title)
+
+		-- bottom line
+		local bottomstr = "Type in a filename to filter file | ctrl+p to close file browser"
+		draw.str(size.w - #bottomstr, size.h, bottomstr)
+
+	end
 end
 
 -- == Core actions =============================================
@@ -474,6 +543,18 @@ end
 function core.close_cmd()
 	mode = 1
 	io.write(string.char(27).."[6 q")
+end
+
+function core.open_finder()
+	mode = 4
+end
+
+function core.close_finder()
+	mode = 1
+	io.write(string.char(27).."[6 q")
+	finder.str = ""
+	finder. x = 1
+	finder.sel = 1
 end
 
 -- FIXME: this does not work when a change is made and we are not at the top of the call stack (i.e. change after redo)
@@ -724,6 +805,137 @@ function core.jump_back()
 	end
 end
 
+-- == File finder ==============================================
+-- TODO: create finder.open() that can handle directories
+-- FIXME: make the file finder use `core.` functions instead of having everything hardcoded
+
+-- the current filename search pattern
+finder.str = ""
+
+finder.x = 1
+
+-- which item in the list of files is currently selected
+finder.sel = 1
+
+-- table containing the files that match the user's search
+
+finder.drawn_files = {}
+
+function finder.draw()
+	local size = term.size
+
+	-- table containing a list of all files and files in subdirs
+	local files = file.list()
+
+	-- this is necessary because without it, things would keep being added without being removed
+	finder.drawn_files = {}
+
+	-- only draw files that match the user's search
+	for _,f in pairs(files) do
+		if f:upper():match(finder.str:upper()) then
+			table.insert(finder.drawn_files, f)
+		end
+	end
+
+	-- draw each file name on the screen
+
+	for i,f in pairs(finder.drawn_files) do
+
+		if i == finder.sel then
+			ansi.write(tostring(i+1)..";3H")
+			table.insert(draw.buff, ">")
+		end
+
+		ansi.write(tostring(i+1)..";5H")
+		table.insert(draw.buff, f)
+	end
+
+	local size = term.size
+
+	ansi.write(tostring(size.h+1)..";0H")
+	table.insert(draw.buff, finder.str)
+
+	ansi.write(tostring(size.h+1)..";"..tostring(finder.x).."H")
+end
+
+function finder.input()
+	os.execute("stty raw")
+
+	local char = io.read(1)
+
+	os.execute("stty sane")
+
+	local char_code = string.byte(char)
+	local is_ctrl = false
+	local is_esc = false
+
+	-- control characters
+	if char_code >= 1 and char_code < 27 then
+		-- convert to relevant character
+		char = string.char(char_code + 64)
+		is_ctrl = true
+	elseif char_code == 27 then
+		io.read(1)
+		is_esc = true
+	-- backspace
+	elseif char_code == 8 or char_code == 127 then
+		if finder.x > 1 then
+			finder.str = finder.str:sub(1, finder.x-2)..finder.str:sub(finder.x)
+			finder.x = finder.x - 1
+		end
+	-- insert characters to the filename search pattern
+	else
+		finder.str = finder.str:sub(1, finder.x-1)..char..finder.str:sub(finder.x)
+		finder.x = finder.x + 1
+	end
+
+	if is_ctrl then
+		char = char:lower()
+
+		if char == "q" then
+			return false
+		elseif char == "p" then
+			core.close_finder()
+		-- enter
+		elseif char == "m" then
+			core.load_file(finder.drawn_files[finder.sel])
+			core.close_finder()
+		end
+	elseif is_esc then
+		local code = io.read(1)
+
+		-- up
+		if code == "A" then
+			if finder.sel > 1 then
+				finder.sel = finder.sel - 1
+			end
+		-- down
+		elseif code == "B" then
+			if finder.sel < #finder.drawn_files then
+				finder.sel = finder.sel + 1
+			end
+		-- right
+		elseif code == "C" then
+			-- cursor right
+			if finder.x < #finder.str + 1 then
+				finder.x = finder.x + 1
+			end
+		-- left
+		elseif code == "D" then
+			-- cursor left
+			if finder.x > 1 then
+				finder.x = finder.x - 1
+			end
+		end
+	end
+
+	if finder.sel > #finder.drawn_files then
+		finder.sel = #finder.drawn_files
+	end
+
+	return true
+end
+
 -- == Input ====================================================
 local function edit_input()
 	os.execute("stty raw")
@@ -826,6 +1038,8 @@ local function edit_input()
 			core.open_cmd()
 			cmd.str = "replace "
 			cmd.x = 9
+		elseif char == "p" then
+			core.open_finder()
 		elseif char == "z" then
 			core.undo()
 		elseif char == "y" then
@@ -970,6 +1184,8 @@ local function nav_input()
 			core.open_cmd()
 			cmd.str = "replace "
 			cmd.x = 9
+		elseif char == "p" then
+			core.open_finder()
 		elseif char == "z" then
 			core.undo()
 		elseif char == "y" then
@@ -1087,6 +1303,8 @@ end
 local function main()
 	local running = true
 
+	file.list()
+
 	-- enable proper cursor
 	io.write(string.char(27).."[6 q]")
 
@@ -1140,10 +1358,22 @@ local function main()
 			io.flush()
 
 			running = cmd_input()
+		elseif mode == 4 then
+			draw.buff = {}
+
+			draw.ui()
+			finder.draw()
+
+			local out = table.concat(draw.buff)
+			io.write(string.char(27).."[H"..out)
+			io.flush()
+
+			running = finder.input()
 		end
 	end
 end
 
+-- FIXME: pcall main, so that we can detect when the editor crashes and call term.reset if so
 main()
 
 -- == Post app exit ============================================
