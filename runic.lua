@@ -22,8 +22,9 @@
 -- BUG: ruler line numbers above 999 take up one extra column of the buffer
 -- BUG: the delete key is still not working? (needs tested)
 -- BUG: when the cursor moves down into scroll range when NOT usingcore.buff_cursor_down() (i.e. enter key) the editor does not scroll
--- BUG: trying to paste when nothing has been copied crashes the editor (try opening it and immediately pressing ctrl+v)
+-- BUG: trying to cut or paste when nothing has been copied crashes the editor (try opening it and immediately pressing ctrl+v)
 -- BUG: sometimes, depending on the character before the cursor, pressing b or e jumps too far
+-- BUG: the editor crashes if the user presses enter when the file finder search pattern does not match anything
 
 -- == Tables ===================================================
 local log = {}
@@ -39,6 +40,7 @@ local draw = {}
 core = {}
 
 -- defined draw.buff up here to avoid errors
+-- if it were defined lower, the ansi.* functions would be trying to access an undefined var
 draw.buff = {}
 
 -- == Logging ==================================================
@@ -209,7 +211,7 @@ function file.list(path)
 		end
 
 		if file.is_dir(obj) then
-			local cat = file.list(path..obj)
+			local cat = file.list(obj)
 
 			for _,v2 in pairs(cat) do
 				table.insert(out, v2)
